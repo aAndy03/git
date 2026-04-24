@@ -12,23 +12,32 @@ pub struct TreeNode {
 }
 
 #[derive(Debug, Default, Clone)]
+pub struct WorkspaceState {
+    pub workspace_root: Option<PathBuf>,
+    pub expanded_paths: BTreeSet<PathBuf>,
+    pub selected_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Clone)]
 pub struct AppCore {
-    workspace_root: Option<PathBuf>,
-    expanded_paths: BTreeSet<PathBuf>,
-    selected_path: Option<PathBuf>,
+    workspace_state: WorkspaceState,
 }
 
 impl AppCore {
+    pub fn workspace_state(&self) -> &WorkspaceState {
+        &self.workspace_state
+    }
+
     pub fn workspace_root(&self) -> Option<&PathBuf> {
-        self.workspace_root.as_ref()
+        self.workspace_state.workspace_root.as_ref()
     }
 
     pub fn selected_path(&self) -> Option<&PathBuf> {
-        self.selected_path.as_ref()
+        self.workspace_state.selected_path.as_ref()
     }
 
     pub fn expanded_paths(&self) -> &BTreeSet<PathBuf> {
-        &self.expanded_paths
+        &self.workspace_state.expanded_paths
     }
 
     pub fn set_workspace_root(&mut self, path: PathBuf) -> Result<(), String> {
@@ -49,18 +58,35 @@ impl AppCore {
             )
         })?;
 
-        self.workspace_root = Some(root.clone());
-        self.selected_path = Some(root.clone());
-        self.expanded_paths.clear();
-        self.expanded_paths.insert(root);
+        self.workspace_state.workspace_root = Some(root.clone());
+        self.workspace_state.selected_path = Some(root.clone());
+        self.workspace_state.expanded_paths.clear();
+        self.workspace_state.expanded_paths.insert(root);
+
+        Ok(())
+    }
+
+    pub fn command_restore_session(
+        &mut self,
+        fs: &FileSystemAdapter,
+        workspace_state: WorkspaceState,
+    ) -> Result<(), String> {
+        let Some(workspace_root) = workspace_state.workspace_root else {
+            self.workspace_state = WorkspaceState::default();
+            return Ok(());
+        };
+
+        self.set_workspace_root(workspace_root)?;
+        self.replace_expanded_paths(workspace_state.expanded_paths);
+        self.restore_selected_path(fs, workspace_state.selected_path);
 
         Ok(())
     }
 
     pub fn replace_expanded_paths(&mut self, expanded_paths: BTreeSet<PathBuf>) {
-        self.expanded_paths = expanded_paths;
-        if let Some(root) = self.workspace_root.as_ref() {
-            self.expanded_paths.insert(root.clone());
+        self.workspace_state.expanded_paths = expanded_paths;
+        if let Some(root) = self.workspace_state.workspace_root.as_ref() {
+            self.workspace_state.expanded_paths.insert(root.clone());
         }
     }
 
@@ -69,35 +95,35 @@ impl AppCore {
         fs: &FileSystemAdapter,
         selected_path: Option<PathBuf>,
     ) {
-        let Some(root) = self.workspace_root.as_ref().cloned() else {
+        let Some(root) = self.workspace_state.workspace_root.as_ref().cloned() else {
             return;
         };
 
         if let Some(path) = selected_path {
             if let Ok(entry) = fs.stat_entry(&root, &path) {
-                self.selected_path = Some(entry.path);
+                self.workspace_state.selected_path = Some(entry.path);
                 return;
             }
         }
 
-        self.selected_path = Some(root);
+        self.workspace_state.selected_path = Some(root);
     }
 
-    pub fn select_path(&mut self, path: PathBuf) {
-        self.selected_path = Some(path);
+    pub fn command_select_path(&mut self, path: PathBuf) {
+        self.workspace_state.selected_path = Some(path);
     }
 
-    pub fn toggle_expanded(&mut self, path: &Path) {
+    pub fn command_toggle_expanded(&mut self, path: &Path) {
         let path = path.to_path_buf();
-        if self.expanded_paths.contains(&path) {
-            self.expanded_paths.remove(&path);
+        if self.workspace_state.expanded_paths.contains(&path) {
+            self.workspace_state.expanded_paths.remove(&path);
         } else {
-            self.expanded_paths.insert(path);
+            self.workspace_state.expanded_paths.insert(path);
         }
     }
 
     pub fn visible_tree(&self, fs: &FileSystemAdapter) -> Result<Vec<TreeNode>, String> {
-        let Some(root) = self.workspace_root.as_ref() else {
+        let Some(root) = self.workspace_state.workspace_root.as_ref() else {
             return Ok(Vec::new());
         };
 
@@ -128,8 +154,8 @@ impl AppCore {
 
         let target = parent.join(name);
         fs.create_dir(root, &target)?;
-        self.expanded_paths.insert(parent.clone());
-        self.selected_path = Some(target.clone());
+        self.workspace_state.expanded_paths.insert(parent.clone());
+        self.workspace_state.selected_path = Some(target.clone());
 
         Ok(target)
     }
@@ -141,8 +167,8 @@ impl AppCore {
 
         let target = parent.join(name);
         fs.create_file(root, &target)?;
-        self.expanded_paths.insert(parent);
-        self.selected_path = Some(target.clone());
+        self.workspace_state.expanded_paths.insert(parent);
+        self.workspace_state.selected_path = Some(target.clone());
 
         Ok(target)
     }
@@ -155,6 +181,7 @@ impl AppCore {
         validate_entry_name(new_name)?;
         let root = self.required_root()?.to_path_buf();
         let selected = self
+            .workspace_state
             .selected_path
             .clone()
             .ok_or_else(|| "nothing selected for rename".to_string())?;
@@ -171,11 +198,11 @@ impl AppCore {
 
         fs.rename(&root, &selected, &target)?;
 
-        if self.expanded_paths.contains(&selected) {
-            self.expanded_paths.remove(&selected);
-            self.expanded_paths.insert(target.clone());
+        if self.workspace_state.expanded_paths.contains(&selected) {
+            self.workspace_state.expanded_paths.remove(&selected);
+            self.workspace_state.expanded_paths.insert(target.clone());
         }
-        self.selected_path = Some(target.clone());
+        self.workspace_state.selected_path = Some(target.clone());
 
         Ok(target)
     }
@@ -183,6 +210,7 @@ impl AppCore {
     pub fn delete_selected(&mut self, fs: &FileSystemAdapter) -> Result<PathBuf, String> {
         let root = self.required_root()?.to_path_buf();
         let selected = self
+            .workspace_state
             .selected_path
             .clone()
             .ok_or_else(|| "nothing selected for delete".to_string())?;
@@ -193,41 +221,22 @@ impl AppCore {
 
         fs.delete_to_trash(&root, &selected)?;
 
-        self.expanded_paths
+        self.workspace_state
+            .expanded_paths
             .retain(|candidate| !candidate.starts_with(&selected));
 
         let fallback = selected
             .parent()
             .map(|parent| parent.to_path_buf())
             .unwrap_or(root);
-        self.selected_path = Some(fallback.clone());
+        self.workspace_state.selected_path = Some(fallback.clone());
 
         Ok(fallback)
     }
 
-    pub fn selected_directory_entries(
-        &self,
-        fs: &FileSystemAdapter,
-    ) -> Result<Vec<EntryInfo>, String> {
-        let root = self.required_root()?;
-        let Some(selected) = self.selected_path.as_ref() else {
-            return Ok(Vec::new());
-        };
-
-        let stat = fs.stat_entry(root, selected)?;
-        if stat.is_dir {
-            fs.list_dir(root, selected)
-        } else {
-            let parent = selected
-                .parent()
-                .ok_or_else(|| format!("selected file has no parent: {}", selected.display()))?;
-            fs.list_dir(root, parent)
-        }
-    }
-
     pub fn selected_entry(&self, fs: &FileSystemAdapter) -> Result<Option<EntryInfo>, String> {
         let root = self.required_root()?;
-        let Some(selected) = self.selected_path.as_ref() else {
+        let Some(selected) = self.workspace_state.selected_path.as_ref() else {
             return Ok(None);
         };
 
@@ -235,7 +244,8 @@ impl AppCore {
     }
 
     fn required_root(&self) -> Result<&PathBuf, String> {
-        self.workspace_root
+        self.workspace_state
+            .workspace_root
             .as_ref()
             .ok_or_else(|| "workspace root not set".to_string())
     }
@@ -243,7 +253,7 @@ impl AppCore {
     fn insertion_parent(&self, fs: &FileSystemAdapter) -> Result<PathBuf, String> {
         let root = self.required_root()?;
 
-        if let Some(selected) = self.selected_path.as_ref() {
+        if let Some(selected) = self.workspace_state.selected_path.as_ref() {
             let stat = fs.stat_entry(root, selected)?;
             if stat.is_dir {
                 return Ok(selected.clone());
@@ -264,11 +274,11 @@ impl AppCore {
         depth: usize,
         nodes: &mut Vec<TreeNode>,
     ) -> Result<(), String> {
-        let Some(root) = self.workspace_root.as_ref() else {
+        let Some(root) = self.workspace_state.workspace_root.as_ref() else {
             return Ok(());
         };
 
-        if !self.expanded_paths.contains(directory) {
+        if !self.workspace_state.expanded_paths.contains(directory) {
             return Ok(());
         }
 

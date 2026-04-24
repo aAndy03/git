@@ -4,7 +4,7 @@ use directories::UserDirs;
 use gpui::{Context, Entity, IntoElement, Render, Window, black, div, prelude::*, px, rgb, white};
 use gpui_component::input::InputState;
 
-use crate::core::{AppCore, TreeNode};
+use crate::core::{AppCore, TreeNode, WorkspaceState};
 use crate::fs_adapter::{EntryInfo, FileSystemAdapter};
 use crate::persistence::{PersistedState, Persistence};
 
@@ -40,16 +40,14 @@ impl AppView {
         if let Some(persistence) = persistence.as_ref() {
             match persistence.load_state() {
                 Ok(saved) => {
-                    if let Some(root) = saved.workspace_root {
-                        match core.set_workspace_root(root) {
-                            Ok(()) => {
-                                core.replace_expanded_paths(saved.expanded_paths);
-                                core.restore_selected_path(&fs, saved.selected_path);
-                            }
-                            Err(err) => {
-                                status_message = format!("Could not restore workspace root: {err}");
-                            }
-                        }
+                    let workspace_state = WorkspaceState {
+                        workspace_root: saved.workspace_root,
+                        expanded_paths: saved.expanded_paths,
+                        selected_path: saved.selected_path,
+                    };
+
+                    if let Err(err) = core.command_restore_session(&fs, workspace_state) {
+                        status_message = format!("Could not restore workspace root: {err}");
                     }
                 }
                 Err(err) => {
@@ -154,9 +152,9 @@ impl AppView {
         is_dir: bool,
         cx: &mut Context<Self>,
     ) {
-        self.core.select_path(path.clone());
+        self.core.command_select_path(path.clone());
         if is_dir {
-            self.core.toggle_expanded(&path);
+            self.core.command_toggle_expanded(&path);
         }
         self.persist_state();
         cx.notify();
@@ -248,10 +246,12 @@ impl AppView {
             return;
         };
 
+        let workspace_state = self.core.workspace_state();
+
         let state = PersistedState {
-            workspace_root: self.core.workspace_root().cloned(),
-            expanded_paths: self.core.expanded_paths().clone(),
-            selected_path: self.core.selected_path().cloned(),
+            workspace_root: workspace_state.workspace_root.clone(),
+            expanded_paths: workspace_state.expanded_paths.clone(),
+            selected_path: workspace_state.selected_path.clone(),
         };
 
         if let Err(err) = persistence.save_state(&state) {
@@ -259,14 +259,7 @@ impl AppView {
         }
     }
 
-    fn tree_and_panel_data(
-        &self,
-    ) -> (
-        Vec<TreeNode>,
-        Option<EntryInfo>,
-        Vec<EntryInfo>,
-        Option<String>,
-    ) {
+    fn tree_and_panel_data(&self) -> (Vec<TreeNode>, Option<EntryInfo>, Option<String>) {
         let mut render_error = None;
 
         let tree_nodes = match self.core.visible_tree(&self.fs) {
@@ -285,23 +278,14 @@ impl AppView {
             }
         };
 
-        let selected_entries = match self.core.selected_directory_entries(&self.fs) {
-            Ok(entries) => entries,
-            Err(err) => {
-                render_error = Some(format!("Directory list error: {err}"));
-                Vec::new()
-            }
-        };
-
-        (tree_nodes, selected, selected_entries, render_error)
+        (tree_nodes, selected, render_error)
     }
 }
 
 impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity();
-        let (tree_nodes, selected_entry, selected_entries, render_error) =
-            self.tree_and_panel_data();
+        let (tree_nodes, selected_entry, render_error) = self.tree_and_panel_data();
 
         let selected_path = self.core.selected_path().cloned();
         let expanded_paths = self.core.expanded_paths().clone();
@@ -353,10 +337,7 @@ impl Render for AppView {
                             .border_color(rgb(0xd0d0d0))
                             .p_2()
                             .child("Details")
-                            .child(detail_panel::render_detail_panel(
-                                selected_entry,
-                                selected_entries,
-                            )),
+                            .child(detail_panel::render_detail_panel(selected_entry)),
                     ),
             )
             .child(

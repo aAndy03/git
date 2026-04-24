@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Debug, Clone)]
 pub struct EntryInfo {
@@ -7,6 +8,7 @@ pub struct EntryInfo {
     pub name: String,
     pub is_dir: bool,
     pub byte_len: u64,
+    pub last_modified: Option<SystemTime>,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -88,12 +90,14 @@ impl FileSystemAdapter {
             let is_dir = metadata.is_dir();
             let name = item.file_name().to_string_lossy().to_string();
             let byte_len = if is_dir { 0 } else { metadata.len() };
+            let last_modified = metadata.modified().ok();
 
             entries.push(EntryInfo {
                 path,
                 name,
                 is_dir,
                 byte_len,
+                last_modified,
             });
         }
 
@@ -125,6 +129,7 @@ impl FileSystemAdapter {
             name,
             is_dir: metadata.is_dir(),
             byte_len: if metadata.is_dir() { 0 } else { metadata.len() },
+            last_modified: metadata.modified().ok(),
         })
     }
 
