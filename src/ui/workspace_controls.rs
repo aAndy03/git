@@ -20,6 +20,7 @@ pub fn render_workspace_controls(
 ) -> impl IntoElement {
     let open_view = view.clone();
     let browse_view = view.clone();
+    let refresh_view = view.clone();
 
     let create_folder_view = view.clone();
     let create_file_view = view.clone();
@@ -53,6 +54,15 @@ pub fn render_workspace_controls(
                             let _ = browse_view.update(cx, |this, cx| {
                                 this.open_workspace_picker();
                                 cx.notify();
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("manual-refresh-workspace")
+                        .label("Refresh Tree")
+                        .on_click(move |_, _, cx| {
+                            let _ = refresh_view.update(cx, |this, cx| {
+                                this.manual_refresh_workspace(cx);
                             });
                         }),
                 ),

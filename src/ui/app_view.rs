@@ -1,12 +1,14 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use directories::UserDirs;
 use gpui::{Context, Entity, IntoElement, Render, Window, black, div, prelude::*, px, rgb, white};
 use gpui_component::input::InputState;
 
-use crate::core::{AppCore, TreeNode, WorkspaceState};
+use crate::core::{AppCore, RefreshSource, TreeNode, WorkspaceState};
 use crate::fs_adapter::{EntryInfo, FileSystemAdapter};
 use crate::persistence::{PersistedState, Persistence};
+use crate::services::watcher::WorkspaceWatcherService;
 
 use super::detail_panel;
 use super::file_explorer;
@@ -16,6 +18,7 @@ pub struct AppView {
     core: AppCore,
     fs: FileSystemAdapter,
     persistence: Option<Persistence>,
+    watcher_service: Option<WorkspaceWatcherService>,
     status_message: String,
     workspace_picker: Option<WorkspacePickerState>,
     workspace_input: Entity<InputState>,
@@ -74,16 +77,19 @@ impl AppView {
             cx.new(|cx| InputState::new(window, cx).placeholder("new entry name (file or folder)"));
         let rename_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("rename to"));
 
-        Self {
+        let mut this = Self {
             core,
             fs,
             persistence,
+            watcher_service: None,
             status_message,
             workspace_picker: None,
             workspace_input,
             create_name_input,
             rename_name_input,
-        }
+        };
+        this.restart_watcher_for_current_workspace();
+        this
     }
 
     pub(crate) fn open_workspace_from_input(&mut self, cx: &mut Context<Self>) {
@@ -96,6 +102,7 @@ impl AppView {
         }
 
         self.set_workspace_root(PathBuf::from(trimmed));
+        cx.notify();
     }
 
     pub(crate) fn open_workspace_picker(&mut self) {
@@ -144,6 +151,22 @@ impl AppView {
 
         self.set_workspace_root(current);
         self.workspace_picker = None;
+    }
+
+    pub(crate) fn manual_refresh_workspace(&mut self, cx: &mut Context<Self>) {
+        match self
+            .core
+            .command_apply_refresh(&self.fs, RefreshSource::Manual, 0)
+        {
+            Ok(()) => {
+                self.status_message = "Workspace manually refreshed".to_string();
+                self.persist_state();
+            }
+            Err(err) => {
+                self.status_message = format!("Manual refresh failed: {err}");
+            }
+        }
+        cx.notify();
     }
 
     pub(crate) fn on_tree_entry_clicked(
@@ -218,6 +241,7 @@ impl AppView {
     fn set_workspace_root(&mut self, path: PathBuf) {
         match self.core.set_workspace_root(path.clone()) {
             Ok(()) => {
+                self.restart_watcher_for_current_workspace();
                 self.status_message = format!("Workspace root opened: {}", path.display());
                 self.persist_state();
             }
@@ -259,6 +283,55 @@ impl AppView {
         }
     }
 
+    fn restart_watcher_for_current_workspace(&mut self) {
+        self.watcher_service = None;
+
+        let Some(root) = self.core.workspace_root().cloned() else {
+            self.core.command_set_watcher_active(false);
+            return;
+        };
+
+        match WorkspaceWatcherService::start(&root, Duration::from_millis(350)) {
+            Ok(service) => {
+                self.core.command_set_watcher_active(true);
+                self.watcher_service = Some(service);
+            }
+            Err(err) => {
+                self.core.command_set_watcher_active(false);
+                self.status_message = format!("Watcher disabled: {err}");
+            }
+        }
+    }
+
+    fn process_watcher_updates(&mut self) {
+        let Some(watcher_service) = self.watcher_service.as_mut() else {
+            self.core.command_set_watcher_active(false);
+            return;
+        };
+
+        let mut refreshed = false;
+
+        while let Some(event) = watcher_service.poll_refresh_event() {
+            match self.core.command_apply_refresh(
+                &self.fs,
+                RefreshSource::Watcher,
+                event.event_count,
+            ) {
+                Ok(()) => {
+                    refreshed = true;
+                }
+                Err(err) => {
+                    self.status_message = format!("Watcher refresh failed: {err}");
+                }
+            }
+        }
+
+        if refreshed {
+            self.status_message = "Workspace refreshed from filesystem changes".to_string();
+            self.persist_state();
+        }
+    }
+
     fn tree_and_panel_data(&self) -> (Vec<TreeNode>, Option<EntryInfo>, Option<String>) {
         let mut render_error = None;
 
@@ -284,12 +357,15 @@ impl AppView {
 
 impl Render for AppView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.process_watcher_updates();
+
         let view = cx.entity();
         let (tree_nodes, selected_entry, render_error) = self.tree_and_panel_data();
 
         let selected_path = self.core.selected_path().cloned();
         let expanded_paths = self.core.expanded_paths().clone();
         let workspace_picker = self.workspace_picker.clone();
+        let watcher_status = self.core.watcher_status_line();
 
         div()
             .size_full()
@@ -337,7 +413,10 @@ impl Render for AppView {
                             .border_color(rgb(0xd0d0d0))
                             .p_2()
                             .child("Details")
-                            .child(detail_panel::render_detail_panel(selected_entry)),
+                            .child(detail_panel::render_detail_panel(
+                                selected_entry,
+                                watcher_status.clone(),
+                            )),
                     ),
             )
             .child(
@@ -346,6 +425,7 @@ impl Render for AppView {
                     .text_size(px(12.0))
                     .text_color(rgb(0x444444))
                     .child(self.status_message.clone())
+                    .child(format!(" | {watcher_status}"))
                     .when_some(render_error, |this, err| this.child(format!(" | {err}"))),
             )
     }

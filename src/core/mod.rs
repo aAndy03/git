@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::fs_adapter::{EntryInfo, FileSystemAdapter};
 
@@ -21,6 +22,30 @@ pub struct WorkspaceState {
 #[derive(Debug, Default, Clone)]
 pub struct AppCore {
     workspace_state: WorkspaceState,
+    refresh_state: RefreshState,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct RefreshState {
+    pub watcher_active: bool,
+    pub last_refresh_at: Option<SystemTime>,
+    pub last_refresh_source: Option<RefreshSource>,
+    pub last_watcher_event_count: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum RefreshSource {
+    Manual,
+    Watcher,
+}
+
+impl RefreshSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Watcher => "watcher",
+        }
+    }
 }
 
 impl AppCore {
@@ -64,6 +89,64 @@ impl AppCore {
         self.workspace_state.expanded_paths.insert(root);
 
         Ok(())
+    }
+
+    pub fn command_set_watcher_active(&mut self, watcher_active: bool) {
+        self.refresh_state.watcher_active = watcher_active;
+    }
+
+    pub fn command_apply_refresh(
+        &mut self,
+        fs: &FileSystemAdapter,
+        source: RefreshSource,
+        watcher_event_count: u32,
+    ) -> Result<(), String> {
+        let Some(root) = self.workspace_root().cloned() else {
+            return Err("workspace root not set".to_string());
+        };
+
+        if fs.stat_entry(&root, &root).is_err() {
+            self.workspace_state = WorkspaceState::default();
+            self.refresh_state.last_refresh_at = Some(SystemTime::now());
+            self.refresh_state.last_refresh_source = Some(source);
+            self.refresh_state.last_watcher_event_count = watcher_event_count;
+            return Err("workspace root is no longer accessible".to_string());
+        }
+
+        let selected_path = self.workspace_state.selected_path.clone();
+        self.restore_selected_path(fs, selected_path);
+
+        self.refresh_state.last_refresh_at = Some(SystemTime::now());
+        self.refresh_state.last_refresh_source = Some(source);
+        self.refresh_state.last_watcher_event_count = watcher_event_count;
+
+        Ok(())
+    }
+
+    pub fn watcher_status_line(&self) -> String {
+        let watcher_state = if self.refresh_state.watcher_active {
+            "watching"
+        } else {
+            "not watching"
+        };
+
+        let refresh_at = self
+            .refresh_state
+            .last_refresh_at
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| format!("{}s", duration.as_secs()))
+            .unwrap_or_else(|| "never".to_string());
+
+        let source = self
+            .refresh_state
+            .last_refresh_source
+            .map(RefreshSource::label)
+            .unwrap_or("none");
+
+        format!(
+            "Watcher: {watcher_state}, Last Refresh: {refresh_at}, Source: {source}, Watcher Events: {}",
+            self.refresh_state.last_watcher_event_count
+        )
     }
 
     pub fn command_restore_session(

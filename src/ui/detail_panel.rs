@@ -4,7 +4,10 @@ use gpui::{IntoElement, div, prelude::*};
 
 use crate::fs_adapter::EntryInfo;
 
-pub fn render_detail_panel(selected_entry: Option<EntryInfo>) -> impl IntoElement {
+pub fn render_detail_panel(
+    selected_entry: Option<EntryInfo>,
+    watcher_status: String,
+) -> impl IntoElement {
     match selected_entry {
         Some(entry) => {
             let kind = if entry.is_dir { "directory" } else { "file" };
@@ -19,8 +22,9 @@ pub fn render_detail_panel(selected_entry: Option<EntryInfo>) -> impl IntoElemen
                 .child(format!("Size (bytes): {}", entry.byte_len))
                 .child(format!("Last Modified: {last_modified}"))
                 .child(format!("Is Folder: {is_folder}"))
+                .child(format!("{watcher_status}"))
         }
-        None => div().child("No selected entry"),
+        None => div().child("No selected entry").child(watcher_status),
     }
 }
 

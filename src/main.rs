@@ -1,6 +1,7 @@
 mod core;
 mod fs_adapter;
 mod persistence;
+mod services;
 mod ui;
 
 use gpui::AppContext;
