@@ -10,6 +10,7 @@ use rusqlite::{Connection, params};
 pub struct PersistedState {
     pub workspace_root: Option<PathBuf>,
     pub expanded_paths: BTreeSet<PathBuf>,
+    pub selected_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -50,14 +51,21 @@ impl Persistence {
             .lock()
             .map_err(|_| "failed to lock sqlite connection".to_string())?;
 
-        let workspace_root = connection
+        let (workspace_root_raw, selected_path_raw) = connection
             .query_row(
-                "SELECT workspace_root FROM app_state WHERE id = 1",
+                "SELECT workspace_root, selected_path FROM app_state WHERE id = 1",
                 [],
-                |row| row.get::<_, Option<String>>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
-            .unwrap_or(None)
-            .map(PathBuf::from);
+            .unwrap_or((None, None));
+
+        let workspace_root = workspace_root_raw.map(PathBuf::from);
+        let selected_path = selected_path_raw.map(PathBuf::from);
 
         let mut expanded_paths = BTreeSet::new();
         let mut statement = connection
@@ -76,6 +84,7 @@ impl Persistence {
         Ok(PersistedState {
             workspace_root,
             expanded_paths,
+            selected_path,
         })
     }
 
@@ -93,12 +102,18 @@ impl Persistence {
             .workspace_root
             .as_ref()
             .map(|path| path.to_string_lossy().to_string());
+        let selected_path = state
+            .selected_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string());
 
         transaction
             .execute(
-                "INSERT INTO app_state (id, workspace_root) VALUES (1, ?1)
-                 ON CONFLICT(id) DO UPDATE SET workspace_root = excluded.workspace_root",
-                params![workspace_root],
+                "INSERT INTO app_state (id, workspace_root, selected_path) VALUES (1, ?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET
+                   workspace_root = excluded.workspace_root,
+                   selected_path = excluded.selected_path",
+                params![workspace_root, selected_path],
             )
             .map_err(|err| format!("failed to upsert app_state: {err}"))?;
 
@@ -133,7 +148,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             "
             CREATE TABLE IF NOT EXISTS app_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                workspace_root TEXT
+                workspace_root TEXT,
+                selected_path TEXT
             );
 
             CREATE TABLE IF NOT EXISTS expanded_nodes (
@@ -142,6 +158,15 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
             ",
         )
         .map_err(|err| format!("failed to initialize sqlite schema: {err}"))?;
+
+    if let Err(err) = connection.execute("ALTER TABLE app_state ADD COLUMN selected_path TEXT", [])
+    {
+        if !err.to_string().contains("duplicate column name") {
+            return Err(format!(
+                "failed to ensure selected_path column in app_state: {err}"
+            ));
+        }
+    }
 
     Ok(())
 }

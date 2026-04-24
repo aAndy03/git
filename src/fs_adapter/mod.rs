@@ -17,6 +17,49 @@ impl FileSystemAdapter {
         Self
     }
 
+    pub fn list_child_directories(&self, directory: &Path) -> Result<Vec<PathBuf>, String> {
+        let canonical_directory = canonicalize_existing(directory)?;
+        let reader = fs::read_dir(&canonical_directory).map_err(|err| {
+            format!(
+                "failed to read picker directory {}: {err}",
+                canonical_directory.display()
+            )
+        })?;
+
+        let mut children = Vec::new();
+
+        for item in reader {
+            let item = item.map_err(|err| {
+                format!(
+                    "failed to read picker entry in {}: {err}",
+                    canonical_directory.display()
+                )
+            })?;
+
+            let metadata = item.metadata().map_err(|err| {
+                format!(
+                    "failed to read picker metadata for {}: {err}",
+                    item.path().display()
+                )
+            })?;
+
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            let path = canonicalize_existing(&item.path())?;
+            children.push(path);
+        }
+
+        children.sort_by(|left, right| {
+            left.to_string_lossy()
+                .to_lowercase()
+                .cmp(&right.to_string_lossy().to_lowercase())
+        });
+
+        Ok(children)
+    }
+
     pub fn list_dir(&self, root: &Path, dir: &Path) -> Result<Vec<EntryInfo>, String> {
         let root_canon = canonicalize_existing(root)?;
         let dir_canon = self.resolve_existing_path(&root_canon, dir)?;

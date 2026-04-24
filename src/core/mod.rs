@@ -64,6 +64,25 @@ impl AppCore {
         }
     }
 
+    pub fn restore_selected_path(
+        &mut self,
+        fs: &FileSystemAdapter,
+        selected_path: Option<PathBuf>,
+    ) {
+        let Some(root) = self.workspace_root.as_ref().cloned() else {
+            return;
+        };
+
+        if let Some(path) = selected_path {
+            if let Ok(entry) = fs.stat_entry(&root, &path) {
+                self.selected_path = Some(entry.path);
+                return;
+            }
+        }
+
+        self.selected_path = Some(root);
+    }
+
     pub fn select_path(&mut self, path: PathBuf) {
         self.selected_path = Some(path);
     }
