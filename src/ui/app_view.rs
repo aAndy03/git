@@ -11,6 +11,7 @@ use crate::persistence::{PersistedState, Persistence};
 use crate::services::watcher::WorkspaceWatcherService;
 
 use super::detail_panel;
+use super::file_action_panel::{self, ImportPathPickerEntry, ImportPathPickerState};
 use super::file_explorer;
 use super::workspace_controls::{self, WorkspacePickerState};
 
@@ -21,9 +22,15 @@ pub struct AppView {
     watcher_service: Option<WorkspaceWatcherService>,
     status_message: String,
     workspace_picker: Option<WorkspacePickerState>,
+    import_picker: Option<ImportPathPickerState>,
+    picked_import_source: Option<PathBuf>,
     workspace_input: Entity<InputState>,
     create_name_input: Entity<InputState>,
     rename_name_input: Entity<InputState>,
+    copy_target_input: Entity<InputState>,
+    move_target_input: Entity<InputState>,
+    import_source_input: Entity<InputState>,
+    import_target_input: Entity<InputState>,
 }
 
 impl AppView {
@@ -76,6 +83,30 @@ impl AppView {
         let create_name_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("new entry name (file or folder)"));
         let rename_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("rename to"));
+        let copy_target_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("copy target directory path");
+            if !workspace_default.is_empty() {
+                state = state.default_value(workspace_default.clone());
+            }
+            state
+        });
+        let move_target_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("move target directory path");
+            if !workspace_default.is_empty() {
+                state = state.default_value(workspace_default.clone());
+            }
+            state
+        });
+        let import_source_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("import source path (file or folder)")
+        });
+        let import_target_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("import target directory path");
+            if !workspace_default.is_empty() {
+                state = state.default_value(workspace_default.clone());
+            }
+            state
+        });
 
         let mut this = Self {
             core,
@@ -84,9 +115,15 @@ impl AppView {
             watcher_service: None,
             status_message,
             workspace_picker: None,
+            import_picker: None,
+            picked_import_source: None,
             workspace_input,
             create_name_input,
             rename_name_input,
+            copy_target_input,
+            move_target_input,
+            import_source_input,
+            import_target_input,
         };
         this.restart_watcher_for_current_workspace();
         this
@@ -238,6 +275,173 @@ impl AppView {
         }
     }
 
+    pub(crate) fn copy_selected_from_input(&mut self, cx: &mut Context<Self>) {
+        let raw_target = self.copy_target_input.read(cx).value().to_string();
+        let trimmed_target = raw_target.trim();
+
+        if trimmed_target.is_empty() {
+            self.status_message = "Copy target directory path is empty".to_string();
+            return;
+        }
+
+        match self
+            .core
+            .copy_selected_to(&self.fs, PathBuf::from(trimmed_target))
+        {
+            Ok(path) => {
+                self.status_message = format!("Copied selection to {}", path.display());
+                self.persist_state();
+            }
+            Err(err) => {
+                self.status_message = format!("Failed to copy selection: {err}");
+            }
+        }
+    }
+
+    pub(crate) fn move_selected_from_input(&mut self, cx: &mut Context<Self>) {
+        let raw_target = self.move_target_input.read(cx).value().to_string();
+        let trimmed_target = raw_target.trim();
+
+        if trimmed_target.is_empty() {
+            self.status_message = "Move target directory path is empty".to_string();
+            return;
+        }
+
+        match self
+            .core
+            .move_selected_to(&self.fs, PathBuf::from(trimmed_target))
+        {
+            Ok(path) => {
+                self.status_message = format!("Moved selection to {}", path.display());
+                self.persist_state();
+            }
+            Err(err) => {
+                self.status_message = format!("Failed to move selection: {err}");
+            }
+        }
+    }
+
+    pub(crate) fn import_from_inputs(&mut self, cx: &mut Context<Self>) {
+        let source = self.picked_import_source.clone().or_else(|| {
+            let raw = self.import_source_input.read(cx).value().to_string();
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(trimmed))
+            }
+        });
+
+        let Some(source) = source else {
+            self.status_message =
+                "Import source path is empty, and no source was picked".to_string();
+            return;
+        };
+
+        let raw_target = self.import_target_input.read(cx).value().to_string();
+        let trimmed_target = raw_target.trim();
+
+        if trimmed_target.is_empty() {
+            self.status_message = "Import target directory path is empty".to_string();
+            return;
+        }
+
+        match self.core.import_entry_into_workspace(
+            &self.fs,
+            source.clone(),
+            PathBuf::from(trimmed_target),
+        ) {
+            Ok(path) => {
+                self.status_message = format!(
+                    "Imported {} into workspace at {}",
+                    source.display(),
+                    path.display()
+                );
+                self.persist_state();
+            }
+            Err(err) => {
+                self.status_message = format!("Failed to import source: {err}");
+            }
+        }
+    }
+
+    pub(crate) fn open_import_picker(&mut self, cx: &mut Context<Self>) {
+        let start = self
+            .picked_import_source
+            .as_ref()
+            .map(|path| {
+                if path.is_dir() {
+                    path.clone()
+                } else {
+                    path.parent()
+                        .map(|parent| parent.to_path_buf())
+                        .unwrap_or_else(|| path.clone())
+                }
+            })
+            .or_else(|| {
+                let raw = self.import_source_input.read(cx).value().to_string();
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(PathBuf::from(trimmed))
+                }
+            })
+            .and_then(|candidate| {
+                if candidate.is_dir() {
+                    Some(candidate)
+                } else {
+                    candidate.parent().map(|parent| parent.to_path_buf())
+                }
+            })
+            .or_else(|| UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("C:\\"));
+
+        self.refresh_import_picker(start);
+    }
+
+    pub(crate) fn close_import_picker(&mut self) {
+        self.import_picker = None;
+    }
+
+    pub(crate) fn import_picker_go_up(&mut self, _cx: &mut Context<Self>) {
+        let Some(current) = self
+            .import_picker
+            .as_ref()
+            .map(|picker| picker.current_dir.clone())
+        else {
+            return;
+        };
+
+        let Some(parent) = current.parent() else {
+            return;
+        };
+
+        self.refresh_import_picker(parent.to_path_buf());
+    }
+
+    pub(crate) fn import_picker_open_child(&mut self, path: PathBuf, _cx: &mut Context<Self>) {
+        self.refresh_import_picker(path);
+    }
+
+    pub(crate) fn import_picker_use_current_folder(&mut self, _cx: &mut Context<Self>) {
+        let Some(current) = self
+            .import_picker
+            .as_ref()
+            .map(|picker| picker.current_dir.clone())
+        else {
+            return;
+        };
+
+        self.picked_import_source = Some(current);
+        self.import_picker = None;
+    }
+
+    pub(crate) fn import_picker_select_entry(&mut self, path: PathBuf) {
+        self.picked_import_source = Some(path);
+        self.import_picker = None;
+    }
+
     fn set_workspace_root(&mut self, path: PathBuf) {
         match self.core.set_workspace_root(path.clone()) {
             Ok(()) => {
@@ -261,6 +465,29 @@ impl AppView {
             }
             Err(err) => {
                 self.status_message = format!("Failed to browse workspace folders: {err}");
+            }
+        }
+    }
+
+    fn refresh_import_picker(&mut self, directory: PathBuf) {
+        match self.fs.list_picker_entries(&directory) {
+            Ok(entries) => {
+                let entries = entries
+                    .into_iter()
+                    .map(|entry| ImportPathPickerEntry {
+                        path: entry.path,
+                        name: entry.name,
+                        is_dir: entry.is_dir,
+                    })
+                    .collect();
+
+                self.import_picker = Some(ImportPathPickerState {
+                    current_dir: directory,
+                    entries,
+                });
+            }
+            Err(err) => {
+                self.status_message = format!("Failed to browse import source paths: {err}");
             }
         }
     }
@@ -365,6 +592,8 @@ impl Render for AppView {
         let selected_path = self.core.selected_path().cloned();
         let expanded_paths = self.core.expanded_paths().clone();
         let workspace_picker = self.workspace_picker.clone();
+        let import_picker = self.import_picker.clone();
+        let picked_import_source = self.picked_import_source.clone();
         let watcher_status = self.core.watcher_status_line();
 
         div()
@@ -414,8 +643,17 @@ impl Render for AppView {
                             .p_2()
                             .child("Details")
                             .child(detail_panel::render_detail_panel(
-                                selected_entry,
+                                selected_entry.clone(),
                                 watcher_status.clone(),
+                            ))
+                            .child(file_action_panel::render_file_action_panel(
+                                view.clone(),
+                                self.copy_target_input.clone(),
+                                self.move_target_input.clone(),
+                                self.import_source_input.clone(),
+                                self.import_target_input.clone(),
+                                import_picker,
+                                picked_import_source,
                             )),
                     ),
             )

@@ -317,6 +317,98 @@ impl AppCore {
         Ok(fallback)
     }
 
+    pub fn copy_selected_to(
+        &mut self,
+        fs: &FileSystemAdapter,
+        target: PathBuf,
+    ) -> Result<PathBuf, String> {
+        let root = self.required_root()?.to_path_buf();
+        let selected = self
+            .workspace_state
+            .selected_path
+            .clone()
+            .ok_or_else(|| "nothing selected for copy".to_string())?;
+
+        if selected == root {
+            return Err("cannot copy workspace root".to_string());
+        }
+
+        let target_stat = fs.stat_entry(&root, &target)?;
+        if !target_stat.is_dir {
+            return Err(format!(
+                "copy target is not a directory: {}",
+                target_stat.path.display()
+            ));
+        }
+
+        let copied = fs.copy_entry(&root, &selected, &target_stat.path)?;
+        self.workspace_state
+            .expanded_paths
+            .insert(target_stat.path.clone());
+        self.workspace_state.selected_path = Some(copied.clone());
+
+        Ok(copied)
+    }
+
+    pub fn move_selected_to(
+        &mut self,
+        fs: &FileSystemAdapter,
+        target: PathBuf,
+    ) -> Result<PathBuf, String> {
+        let root = self.required_root()?.to_path_buf();
+        let selected = self
+            .workspace_state
+            .selected_path
+            .clone()
+            .ok_or_else(|| "nothing selected for move".to_string())?;
+
+        if selected == root {
+            return Err("cannot move workspace root".to_string());
+        }
+
+        let target_stat = fs.stat_entry(&root, &target)?;
+        if !target_stat.is_dir {
+            return Err(format!(
+                "move target is not a directory: {}",
+                target_stat.path.display()
+            ));
+        }
+
+        let moved = fs.move_entry(&root, &selected, &target_stat.path)?;
+        self.remap_expanded_prefix(&selected, &moved);
+        self.workspace_state
+            .expanded_paths
+            .insert(target_stat.path.clone());
+        self.workspace_state.selected_path = Some(moved.clone());
+
+        Ok(moved)
+    }
+
+    pub fn import_entry_into_workspace(
+        &mut self,
+        fs: &FileSystemAdapter,
+        source: PathBuf,
+        target: PathBuf,
+    ) -> Result<PathBuf, String> {
+        let root = self.required_root()?.to_path_buf();
+
+        let target_stat = fs.stat_entry(&root, &target)?;
+        if !target_stat.is_dir {
+            return Err(format!(
+                "import target is not a directory: {}",
+                target_stat.path.display()
+            ));
+        }
+
+        let imported = fs.import_entry(&root, &source, &target_stat.path)?;
+        self.workspace_state
+            .expanded_paths
+            .insert(target_stat.path.clone());
+        self.workspace_state.selected_path = Some(imported.clone());
+
+        Ok(imported)
+    }
+
     pub fn selected_entry(&self, fs: &FileSystemAdapter) -> Result<Option<EntryInfo>, String> {
         let root = self.required_root()?;
         let Some(selected) = self.workspace_state.selected_path.as_ref() else {
@@ -381,6 +473,24 @@ impl AppCore {
         }
 
         Ok(())
+    }
+
+    fn remap_expanded_prefix(&mut self, old_prefix: &Path, new_prefix: &Path) {
+        let mut remapped = BTreeSet::new();
+
+        for path in &self.workspace_state.expanded_paths {
+            if let Ok(suffix) = path.strip_prefix(old_prefix) {
+                remapped.insert(new_prefix.join(suffix));
+            } else {
+                remapped.insert(path.clone());
+            }
+        }
+
+        if let Some(root) = self.workspace_state.workspace_root.as_ref() {
+            remapped.insert(root.clone());
+        }
+
+        self.workspace_state.expanded_paths = remapped;
     }
 }
 

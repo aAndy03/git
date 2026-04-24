@@ -1,5 +1,6 @@
 mod app_view;
 mod detail_panel;
+mod file_action_panel;
 mod file_explorer;
 mod workspace_controls;
 
